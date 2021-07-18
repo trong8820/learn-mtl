@@ -13,6 +13,95 @@
 
 static const NSUInteger MAX_BUFFERS_IN_FLIGHT = 3;
 
+const char* vertexShaderSource = R"(
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+#pragma clang diagnostic ignored "-Wmissing-braces"
+
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+template<typename T, size_t Num>
+struct spvUnsafeArray
+{
+    T elements[Num ? Num : 1];
+    
+    thread T& operator [] (size_t pos) thread
+    {
+        return elements[pos];
+    }
+    constexpr const thread T& operator [] (size_t pos) const thread
+    {
+        return elements[pos];
+    }
+    
+    device T& operator [] (size_t pos) device
+    {
+        return elements[pos];
+    }
+    constexpr const device T& operator [] (size_t pos) const device
+    {
+        return elements[pos];
+    }
+    
+    constexpr const constant T& operator [] (size_t pos) const constant
+    {
+        return elements[pos];
+    }
+    
+    threadgroup T& operator [] (size_t pos) threadgroup
+    {
+        return elements[pos];
+    }
+    constexpr const threadgroup T& operator [] (size_t pos) const threadgroup
+    {
+        return elements[pos];
+    }
+};
+
+constant spvUnsafeArray<float2, 3> _19 = spvUnsafeArray<float2, 3>({ float2(0.0, -0.5), float2(0.5), float2(-0.5, 0.5) });
+constant spvUnsafeArray<float3, 3> _28 = spvUnsafeArray<float3, 3>({ float3(1.0, 0.0, 0.0), float3(0.0, 1.0, 0.0), float3(0.0, 0.0, 1.0) });
+
+struct main0_out
+{
+    float3 fragColor [[user(locn0)]];
+    float4 gl_Position [[position]];
+};
+
+vertex main0_out main0(uint gl_VertexIndex [[vertex_id]])
+{
+    main0_out out = {};
+    out.gl_Position = float4(_19[int(gl_VertexIndex)], 0.0, 1.0);
+    out.fragColor = _28[int(gl_VertexIndex)];
+    return out;
+}
+)";
+
+const char* fragmentShaderSource = R"(
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct main0_out
+{
+    float4 outColor [[color(0)]];
+};
+
+struct main0_in
+{
+    float3 fragColor [[user(locn0)]];
+};
+
+fragment main0_out main0(main0_in in [[stage_in]])
+{
+    main0_out out = {};
+    out.outColor = float4(in.fragColor, 1.0);
+    return out;
+}
+)";
+
 @interface Renderer : NSObject <MTKViewDelegate>
 -(nonnull instancetype)initWithMetalKitView:(nonnull MTKView *)view;
 @end
@@ -21,6 +110,10 @@ static const NSUInteger MAX_BUFFERS_IN_FLIGHT = 3;
 {
     dispatch_semaphore_t inFlightSemaphore;
     id<MTLDevice> device;
+    
+    id<MTLRenderPipelineState> renderPipelineState;
+    id<MTLDepthStencilState> depthStencilState;
+    
     id<MTLCommandQueue> commandQueue;
 }
 
@@ -36,6 +129,48 @@ static const NSUInteger MAX_BUFFERS_IN_FLIGHT = 3;
         view.depthStencilPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
         view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
         view.sampleCount = 1;
+        
+        NSError* vertexshaderError;
+        id<MTLLibrary> vertexLibrary = [device newLibraryWithSource:[NSString stringWithUTF8String:vertexShaderSource]
+                                                            options:nil
+                                                              error:&vertexshaderError];
+        if (!vertexLibrary)
+        {
+            NSLog(@"Can not compile metal shader: %@", vertexshaderError);
+        }
+        
+        NSError* fragmentshaderError;
+        id<MTLLibrary> fragmentLibrary = [device newLibraryWithSource:[NSString stringWithUTF8String:fragmentShaderSource]
+                                                              options:nil
+                                                                error:&fragmentshaderError];
+        if (!fragmentLibrary)
+        {
+            NSLog(@"Can not compile metal shader: %@", fragmentshaderError);
+        }
+        
+        id<MTLFunction> vertexFunction = [vertexLibrary newFunctionWithName:@"main0"];
+        id<MTLFunction> fragmentFunction = [fragmentLibrary newFunctionWithName:@"main0"];
+        
+        MTLRenderPipelineDescriptor* renderPipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
+        renderPipelineDescriptor.sampleCount = view.sampleCount;
+        renderPipelineDescriptor.vertexFunction = vertexFunction;
+        renderPipelineDescriptor.fragmentFunction = fragmentFunction;
+        renderPipelineDescriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat;
+        renderPipelineDescriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat;
+        renderPipelineDescriptor.stencilAttachmentPixelFormat = view.depthStencilPixelFormat;
+        
+        NSError* renderPipelineError;
+        renderPipelineState = [device newRenderPipelineStateWithDescriptor:renderPipelineDescriptor
+                                                                     error:&renderPipelineError];
+        if (!renderPipelineState)
+        {
+            NSLog(@"Failed to create pipeline state, error %@", renderPipelineError);
+        }
+        
+        MTLDepthStencilDescriptor* depthStencilDescriptor = [[MTLDepthStencilDescriptor alloc] init];
+        depthStencilDescriptor.depthCompareFunction = MTLCompareFunctionLess;
+        depthStencilDescriptor.depthWriteEnabled = YES;
+        depthStencilState = [device newDepthStencilStateWithDescriptor:depthStencilDescriptor];
         
         commandQueue = [device newCommandQueue];
     }
@@ -61,6 +196,12 @@ static const NSUInteger MAX_BUFFERS_IN_FLIGHT = 3;
         renderPassDescriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
         
         id<MTLRenderCommandEncoder> renderCommandEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
+        [renderCommandEncoder setFrontFacingWinding:MTLWindingCounterClockwise];
+        [renderCommandEncoder setCullMode:MTLCullModeBack];
+        [renderCommandEncoder setRenderPipelineState:renderPipelineState];
+        [renderCommandEncoder setDepthStencilState:depthStencilState];
+        
+        [renderCommandEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         
         [renderCommandEncoder endEncoding];
         [commandBuffer presentDrawable:view.currentDrawable];
