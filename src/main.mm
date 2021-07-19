@@ -13,72 +13,65 @@
 
 static const NSUInteger MAX_BUFFERS_IN_FLIGHT = 3;
 
-const char* vertexShaderSource = R"(
-#pragma clang diagnostic ignored "-Wmissing-prototypes"
-#pragma clang diagnostic ignored "-Wmissing-braces"
+const float PI = 3.14159265358979f;
 
+// Cube
+float vertices[] = {
+    // Pos                      // Color
+    -0.5f, -0.5f, -0.5f,        0.0f, 0.0f, 0.0f,
+    -0.5f, -0.5f, +0.5f,        0.0f, 0.0f, 1.0f,
+    -0.5f, +0.5f, -0.5f,        0.0f, 1.0f, 0.0f,
+    -0.5f, +0.5f, +0.5f,        0.0f, 1.0f, 1.0f,
+    +0.5f, -0.5f, -0.5f,        1.0f, 0.0f, 0.0f,
+    +0.5f, -0.5f, +0.5f,        1.0f, 0.0f, 1.0f,
+    +0.5f, +0.5f, -0.5f,        1.0f, 1.0f, 0.0f,
+    +0.5f, +0.5f, +0.5f,        1.0f, 1.0f, 1.0f
+};
+
+unsigned int indices[] =
+{
+    0, 2, 1,
+    1, 2, 3,
+    4, 5, 6,
+    5, 7, 6,
+    0, 1, 5,
+    0, 5, 4,
+    2, 6, 7,
+    2, 7, 3,
+    0, 4, 6,
+    0, 6, 2,
+    1, 3, 7,
+    1, 7, 5
+};
+
+const char* vertexShaderSource = R"(
 #include <metal_stdlib>
 #include <simd/simd.h>
 
 using namespace metal;
-
-template<typename T, size_t Num>
-struct spvUnsafeArray
-{
-    T elements[Num ? Num : 1];
-    
-    thread T& operator [] (size_t pos) thread
-    {
-        return elements[pos];
-    }
-    constexpr const thread T& operator [] (size_t pos) const thread
-    {
-        return elements[pos];
-    }
-    
-    device T& operator [] (size_t pos) device
-    {
-        return elements[pos];
-    }
-    constexpr const device T& operator [] (size_t pos) const device
-    {
-        return elements[pos];
-    }
-    
-    constexpr const constant T& operator [] (size_t pos) const constant
-    {
-        return elements[pos];
-    }
-    
-    threadgroup T& operator [] (size_t pos) threadgroup
-    {
-        return elements[pos];
-    }
-    constexpr const threadgroup T& operator [] (size_t pos) const threadgroup
-    {
-        return elements[pos];
-    }
-};
 
 struct OffsetBlock
 {
     float offsetx;
 };
 
-constant spvUnsafeArray<float2, 3> _19 = spvUnsafeArray<float2, 3>({ float2(0.0, -0.5), float2(0.5), float2(-0.5, 0.5) });
-constant spvUnsafeArray<float3, 3> _28 = spvUnsafeArray<float3, 3>({ float3(1.0, 0.0, 0.0), float3(0.0, 1.0, 0.0), float3(0.0, 0.0, 1.0) });
-
 struct main0_out
 {
-    float3 fragColor [[user(locn0)]];
+    float3 vColor [[user(locn0)]];
     float4 gl_Position [[position]];
 };
 
-vertex main0_out main0(constant OffsetBlock& _45 [[buffer(0)]], uint gl_VertexIndex [[vertex_id]])
+struct main0_in
+{
+    float3 aPos [[attribute(0)]];
+    float3 aColor [[attribute(1)]];
+};
+
+vertex main0_out main0(main0_in in [[stage_in]], constant OffsetBlock& _26 [[buffer(0)]])
 {
     main0_out out = {};
-    out.gl_Position = float4(_19[int(gl_VertexIndex)] + float2(_45.offsetx, 0.0), 0.0, 1.0);
-    out.fragColor = _28[int(gl_VertexIndex)];
+    out.vColor = in.aColor;
+    out.gl_Position = float4(in.aPos + float3(_26.offsetx, 0.0, 0.5), 1.0);
     return out;
 }
 )";
@@ -91,18 +84,18 @@ using namespace metal;
 
 struct main0_out
 {
-    float4 outColor [[color(0)]];
+    float4 FragColor [[color(0)]];
 };
 
 struct main0_in
 {
-    float3 fragColor [[user(locn0)]];
+    float3 vColor [[user(locn0)]];
 };
 
 fragment main0_out main0(main0_in in [[stage_in]])
 {
     main0_out out = {};
-    out.outColor = float4(in.fragColor, 1.0);
+    out.FragColor = float4(in.vColor, 1.0);
     return out;
 }
 )";
@@ -116,14 +109,18 @@ fragment main0_out main0(main0_in in [[stage_in]])
     dispatch_semaphore_t inFlightSemaphore;
     id<MTLDevice> device;
     
-    id<MTLBuffer> dynamicUniformBuffer[MAX_BUFFERS_IN_FLIGHT];
-    
     id<MTLRenderPipelineState> renderPipelineState;
     id<MTLDepthStencilState> depthStencilState;
     
     id<MTLCommandQueue> commandQueue;
     
+    id<MTLBuffer> dynamicUniformBuffer[MAX_BUFFERS_IN_FLIGHT];
     uint8_t uniformBufferIndex;
+    
+    id<MTLBuffer> vertexBuffer;
+    id<MTLBuffer> indexBuffer;
+    MTLVertexDescriptor* vertexDescriptor;
+    
     float offsetx;
 }
 
@@ -141,6 +138,19 @@ fragment main0_out main0(main0_in in [[stage_in]])
         view.depthStencilPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
         view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
         view.sampleCount = 1;
+        
+        vertexDescriptor = [[MTLVertexDescriptor alloc] init];
+        vertexDescriptor.attributes[0].format = MTLVertexFormatFloat3;
+        vertexDescriptor.attributes[0].offset = 0;
+        vertexDescriptor.attributes[0].bufferIndex = 2;
+        
+        vertexDescriptor.attributes[1].format = MTLVertexFormatFloat3;
+        vertexDescriptor.attributes[1].offset = 12;
+        vertexDescriptor.attributes[1].bufferIndex = 2;
+        
+        vertexDescriptor.layouts[2].stride = 24;
+        vertexDescriptor.layouts[2].stepRate = 1;
+        vertexDescriptor.layouts[2].stepFunction = MTLVertexStepFunctionPerVertex;
         
         NSError* vertexshaderError;
         id<MTLLibrary> vertexLibrary = [device newLibraryWithSource:[NSString stringWithUTF8String:vertexShaderSource]
@@ -167,6 +177,7 @@ fragment main0_out main0(main0_in in [[stage_in]])
         renderPipelineDescriptor.sampleCount = view.sampleCount;
         renderPipelineDescriptor.vertexFunction = vertexFunction;
         renderPipelineDescriptor.fragmentFunction = fragmentFunction;
+        renderPipelineDescriptor.vertexDescriptor = vertexDescriptor;
         renderPipelineDescriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat;
         renderPipelineDescriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat;
         renderPipelineDescriptor.stencilAttachmentPixelFormat = view.depthStencilPixelFormat;
@@ -189,6 +200,13 @@ fragment main0_out main0(main0_in in [[stage_in]])
             dynamicUniformBuffer[i] = [device newBufferWithLength:sizeof(float)
                                                           options:MTLResourceStorageModeShared];
         }
+        
+        vertexBuffer = [device newBufferWithBytes:vertices
+                                           length:sizeof(vertices)
+                                          options:MTLResourceStorageModeShared];
+        indexBuffer = [device newBufferWithBytes:indices
+                                          length:sizeof(indices)
+                                         options:MTLResourceStorageModeShared];
         
         commandQueue = [device newCommandQueue];
     }
@@ -230,7 +248,15 @@ fragment main0_out main0(main0_in in [[stage_in]])
                                        offset:0
                                       atIndex:0];
         
-        [renderCommandEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [renderCommandEncoder setVertexBuffer:vertexBuffer
+                                       offset:0
+                                      atIndex:2];
+        
+        [renderCommandEncoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                         indexCount:36
+                                          indexType:MTLIndexTypeUInt32
+                                        indexBuffer:indexBuffer
+                                  indexBufferOffset:0];
         
         [renderCommandEncoder endEncoding];
         [commandBuffer presentDrawable:view.currentDrawable];
