@@ -60,6 +60,11 @@ struct spvUnsafeArray
     }
 };
 
+struct OffsetBlock
+{
+    float offsetx;
+};
+
 constant spvUnsafeArray<float2, 3> _19 = spvUnsafeArray<float2, 3>({ float2(0.0, -0.5), float2(0.5), float2(-0.5, 0.5) });
 constant spvUnsafeArray<float3, 3> _28 = spvUnsafeArray<float3, 3>({ float3(1.0, 0.0, 0.0), float3(0.0, 1.0, 0.0), float3(0.0, 0.0, 1.0) });
 
@@ -69,10 +74,10 @@ struct main0_out
     float4 gl_Position [[position]];
 };
 
-vertex main0_out main0(uint gl_VertexIndex [[vertex_id]])
+vertex main0_out main0(constant OffsetBlock& _45 [[buffer(0)]], uint gl_VertexIndex [[vertex_id]])
 {
     main0_out out = {};
-    out.gl_Position = float4(_19[int(gl_VertexIndex)], 0.0, 1.0);
+    out.gl_Position = float4(_19[int(gl_VertexIndex)] + float2(_45.offsetx, 0.0), 0.0, 1.0);
     out.fragColor = _28[int(gl_VertexIndex)];
     return out;
 }
@@ -111,15 +116,22 @@ fragment main0_out main0(main0_in in [[stage_in]])
     dispatch_semaphore_t inFlightSemaphore;
     id<MTLDevice> device;
     
+    id<MTLBuffer> dynamicUniformBuffer[MAX_BUFFERS_IN_FLIGHT];
+    
     id<MTLRenderPipelineState> renderPipelineState;
     id<MTLDepthStencilState> depthStencilState;
     
     id<MTLCommandQueue> commandQueue;
+    
+    uint8_t uniformBufferIndex;
+    float offsetx;
 }
 
 -(nonnull instancetype)initWithMetalKitView:(nonnull MTKView *)view
 {
     self = [super init];
+    uniformBufferIndex = 0;
+    offsetx = 0.5f;
     
     if (self)
     {
@@ -172,6 +184,12 @@ fragment main0_out main0(main0_in in [[stage_in]])
         depthStencilDescriptor.depthWriteEnabled = YES;
         depthStencilState = [device newDepthStencilStateWithDescriptor:depthStencilDescriptor];
         
+        for (NSUInteger i=0; i<MAX_BUFFERS_IN_FLIGHT; i++)
+        {
+            dynamicUniformBuffer[i] = [device newBufferWithLength:sizeof(float)
+                                                          options:MTLResourceStorageModeShared];
+        }
+        
         commandQueue = [device newCommandQueue];
     }
     
@@ -182,11 +200,18 @@ fragment main0_out main0(main0_in in [[stage_in]])
 {
     dispatch_semaphore_wait(inFlightSemaphore, DISPATCH_TIME_FOREVER);
     
+    uniformBufferIndex = (uniformBufferIndex + 1) % MAX_BUFFERS_IN_FLIGHT;
+    
     id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
     __block dispatch_semaphore_t blockSemaphore = inFlightSemaphore;
     [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> _) {
         dispatch_semaphore_signal(blockSemaphore);
     }];
+    
+    offsetx += 0.01f;
+    if (offsetx > 0.5f) offsetx = -0.5f;
+    float* uniforms = (float*) dynamicUniformBuffer[uniformBufferIndex].contents;
+    *uniforms = offsetx;
     
     MTLRenderPassDescriptor* renderPassDescriptor = view.currentRenderPassDescriptor;
     if (renderPassDescriptor != nil)
@@ -200,6 +225,10 @@ fragment main0_out main0(main0_in in [[stage_in]])
         [renderCommandEncoder setCullMode:MTLCullModeBack];
         [renderCommandEncoder setRenderPipelineState:renderPipelineState];
         [renderCommandEncoder setDepthStencilState:depthStencilState];
+        
+        [renderCommandEncoder setVertexBuffer:dynamicUniformBuffer[uniformBufferIndex]
+                                       offset:0
+                                      atIndex:0];
         
         [renderCommandEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         
@@ -236,8 +265,6 @@ fragment main0_out main0(main0_in in [[stage_in]])
 
 void run()
 {
-    const id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-    
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow* pWindow = glfwCreateWindow(800, 600, "GLFW Metal", nullptr, nullptr);
@@ -245,6 +272,8 @@ void run()
     int width{};
     int height{};
     glfwGetFramebufferSize(pWindow, &width, &height);
+    
+    const id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     
     CGRect frame = CGRectMake(0.0f, 0.0f, width, height);
     MTKView* view = [[MTKView alloc] initWithFrame:frame device:device];
